@@ -20,6 +20,8 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -75,6 +77,9 @@ public class SecurityConfig {
     @Value("${supabase.url}")
     private String supabaseUrl;
 
+    @Value("${supabase.jwt-secret}")
+    private String supabaseJwtSecret;
+
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
@@ -94,23 +99,10 @@ public class SecurityConfig {
 
     @Bean
     public JwtDecoder jwtDecoder() {
-        // Set explicit connect+read timeouts on the JWKS fetch (5 seconds each).
-        // The default RestTemplate has no timeout — Supabase network blips caused the
-        // JWKS read to hang for 30+ seconds, failing every JWT validation with a 500.
-        //
-        // NimbusJwtDecoder caches the JWKS in memory and only re-fetches when a
-        // key ID is missing (i.e. after key rotation), so normal traffic is unaffected.
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(5_000);
-        factory.setReadTimeout(5_000);
-        RestOperations rest = new RestTemplate(factory);
-
-        String jwkSetUri = supabaseUrl + "/auth/v1/.well-known/jwks.json";
-
-        return NimbusJwtDecoder
-                .withJwkSetUri(jwkSetUri)
-                .jwsAlgorithm(SignatureAlgorithm.ES256)
-                .restOperations(rest)
+        byte[] secretBytes = supabaseJwtSecret.getBytes(StandardCharsets.UTF_8);
+        SecretKeySpec secretKey = new SecretKeySpec(secretBytes, "HmacSHA256");
+        return NimbusJwtDecoder.withSecretKey(secretKey)
+                .jwsAlgorithm(SignatureAlgorithm.HS256)
                 .build();
     }
 

@@ -16,6 +16,7 @@ const MAX_PAGE_LIMIT = 100;
 const SUBSCRIPTION_TOKEN_TTL_MS = 2 * 60 * 1000;
 const MAX_EXPIRED_BUFFER = 50;
 const MEMORY_SWEEP_INTERVAL_MS = 60_000;
+const MAX_MEMORY_SESSIONS = parseInt(process.env.MAX_MEMORY_SESSIONS || '1000', 10);
 
 const ATOMIC_WRITE_SCRIPT = `
   redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
@@ -183,20 +184,25 @@ async function backfillMemorySessionsToRedis() {
   backfillInProgress = true;
   let migrated = 0;
   try {
-    for (const [id, session] of memorySessions.entries()) {
-      const ttl = memorySessionTtls.get(id);
-      if (!ttl || ttl <= Date.now()) continue;
-      const existing = await redis.get(sessionKey(id));
-      if (!existing) {
-        await redis.set(sessionKey(id), session, { ex: SESSION_TTL_SECONDS });
-        migrated++;
-        memorySessions.delete(id);
-        memorySessionTtls.delete(id);
-      } else {
-        // Session already in Redis, safe to remove from memory
-        memorySessions.delete(id);
-        memorySessionTtls.delete(id);
+    const entries = [...memorySessions.entries()];
+    const BATCH_SIZE = 100;
+    for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+      const batch = entries.slice(i, i + BATCH_SIZE);
+      for (const [id, session] of batch) {
+        const ttl = memorySessionTtls.get(id);
+        if (!ttl || ttl <= Date.now()) continue;
+        const existing = await redis.get(sessionKey(id));
+        if (!existing) {
+          await redis.set(sessionKey(id), session, { ex: SESSION_TTL_SECONDS });
+          migrated++;
+          memorySessions.delete(id);
+          memorySessionTtls.delete(id);
+        } else {
+          memorySessions.delete(id);
+          memorySessionTtls.delete(id);
+        }
       }
+      await new Promise(resolve => setImmediate(resolve));
     }
     if (migrated > 0) {
       console.log(`[sessionStore] Migrated ${migrated} sessions from memory to Redis. Memory sessions remaining: ${memorySessions.size}`);
@@ -259,20 +265,38 @@ function ensureRedisConnection() {
 
 function startMemorySweeper() {
   if (memorySweepTimer) return;
-  memorySweepTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [key, expiresAt] of memorySessionTtls) {
-      if (now >= expiresAt) {
-        memorySessions.delete(key);
-        memorySessionTtls.delete(key);
+  function scheduleSweep() {
+    const ratio = memorySessions.size / MAX_MEMORY_SESSIONS;
+    const interval = ratio > 0.8 ? 10_000 : ratio > 0.5 ? 30_000 : MEMORY_SWEEP_INTERVAL_MS;
+    memorySweepTimer = setTimeout(() => {
+      const now = Date.now();
+      for (const [key, expiresAt] of memorySessionTtls) {
+        if (now >= expiresAt) {
+          memorySessions.delete(key);
+          memorySessionTtls.delete(key);
+        }
       }
-    }
-  }, MEMORY_SWEEP_INTERVAL_MS);
-  if (memorySweepTimer.unref) memorySweepTimer.unref();
+      scheduleSweep();
+    }, interval);
+    if (memorySweepTimer.unref) memorySweepTimer.unref();
+  }
+  scheduleSweep();
 }
 
 function touchMemorySession(sessionId) {
   memorySessionTtls.set(sessionId, Date.now() + SESSION_TTL_MS);
+}
+
+function enforceMemorySessionCapacity() {
+  if (memorySessions.size < MAX_MEMORY_SESSIONS) return;
+  const sorted = [...memorySessionTtls.entries()].sort((a, b) => a[1] - b[1]);
+  const evictCount = Math.max(1, Math.floor(MAX_MEMORY_SESSIONS * 0.2));
+  const toEvict = sorted.slice(0, Math.min(evictCount, sorted.length));
+  for (const [key] of toEvict) {
+    memorySessions.delete(key);
+    memorySessionTtls.delete(key);
+  }
+  console.warn(`[sessionStore] Evicted ${toEvict.length} oldest sessions. Current size: ${memorySessions.size}`);
 }
 
 const TRUSTED_ORIGINS = (() => {
@@ -493,6 +517,9 @@ async function writeSession(session) {
         markRedisOffline(err);
         startMemorySweeper();
         startReconciliationTimer();
+        if (memorySessions.size >= MAX_MEMORY_SESSIONS) {
+          enforceMemorySessionCapacity();
+        }
         memorySessions.set(nextSession.id, nextSession);
         touchMemorySession(nextSession.id);
         memoryWriteCount++;
@@ -501,6 +528,9 @@ async function writeSession(session) {
     } else {
       startMemorySweeper();
       startReconciliationTimer();
+      if (memorySessions.size >= MAX_MEMORY_SESSIONS) {
+        enforceMemorySessionCapacity();
+      }
       memorySessions.set(nextSession.id, nextSession);
       touchMemorySession(nextSession.id);
       memoryWriteCount++;
@@ -1173,18 +1203,29 @@ if (typeof process !== "undefined" && process.on) {
 
   function dumpMemorySessions() {
     if (memorySessions.size === 0) return;
+    const enabled = process.env.SESSION_STORE_DUMP_ENABLED === 'true';
+    if (!enabled) {
+      console.log(`[sessionStore] Crash dump disabled via SESSION_STORE_DUMP_ENABLED. ${memorySessions.size} sessions not dumped.`);
+      return;
+    }
     const dumpDir = process.env.TEMP_DIR || "/tmp";
     const dumpPath = path.join(dumpDir, `algobuddy-session-store-dump-${Date.now()}.json`);
     try {
+      const maxDumpSessions = 1000;
+      const sessionsToDump = memorySessions.size > maxDumpSessions
+        ? Object.fromEntries([...memorySessions.entries()].slice(0, maxDumpSessions))
+        : Object.fromEntries(memorySessions);
       const dump = {
         timestamp: new Date().toISOString(),
-        sessions: Object.fromEntries(memorySessions),
+        totalSessions: memorySessions.size,
+        dumpedSessions: Math.min(memorySessions.size, maxDumpSessions),
+        sessions: sessionsToDump,
       };
       if (!fs.existsSync(dumpDir)) {
         fs.mkdirSync(dumpDir, { recursive: true });
       }
       fs.writeFileSync(dumpPath, JSON.stringify(dump, null, 2));
-      console.log(`[sessionStore] Dumped ${memorySessions.size} memory sessions to ${dumpPath}`);
+      console.log(`[sessionStore] Dumped ${Math.min(memorySessions.size, maxDumpSessions)}/${memorySessions.size} memory sessions to ${dumpPath}`);
     } catch (err) {
       console.error("[sessionStore] Failed to dump memory sessions:", err.message || err);
     }
