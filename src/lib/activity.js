@@ -1,17 +1,29 @@
 import { supabase } from "@/lib/supabase";
 import { api } from "./apiClient";
 
+let pendingTrack = null;
+
 const trackActivity = async (type = "site_visit") => {
-  try {
-    await api.request("/api/activity", {
-      method: "POST",
-      body: { type, localDate: getLocalISODate() },
-    });
-    return { success: true };
-  } catch (e) {
-    console.error("trackActivity failed:", e);
-    return { success: false, error: e };
+  if (pendingTrack) {
+    pendingTrack.type = type;
+    return pendingTrack.promise;
   }
+  let resolve;
+  pendingTrack = { promise: new Promise((r) => { resolve = r; }), type, resolve };
+  setTimeout(() => {
+    const p = pendingTrack;
+    pendingTrack = null;
+    api.request("/api/activity", {
+      method: "POST",
+      body: { type: p.type, localDate: getLocalISODate() },
+    }).then(() => {
+      p.resolve({ success: true });
+    }).catch((e) => {
+      console.error("trackActivity failed:", e);
+      p.resolve({ success: false, error: e });
+    });
+  }, 500);
+  return pendingTrack.promise;
 };
 
 const getLocalISODate = (date = new Date()) => {

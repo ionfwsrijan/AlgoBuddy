@@ -20,13 +20,22 @@ export async function POST(request) {
 
     const cookieStore = await cookies();
     const supabase = getSupabaseServerClient(cookieStore);
-    const { error } = await supabase
+    const { error, data } = await supabase
       .from("user_activity")
       .upsert(
         { user_id: authResult.user.id, activity_date: localDate, type: type || "site_visit" },
-        { onConflict: "user_id, activity_date", ignoreDuplicates: true }
-      );
+        { onConflict: "user_id, activity_date", ignoreDuplicates: false }
+      )
+      .select()
+      .maybeSingle();
     if (error) return jsonResponse({ error: error.message }, 500);
+
+    if (data && process.env.ENABLE_STREAK_ON_ACTIVITY === "true") {
+      await supabase.rpc('increment_streak_on_activity', {
+        p_user_id: authResult.user.id,
+      }).maybeSingle();
+    }
+
     return jsonResponse({ success: true });
   } catch (error) {
     return errorResponse(error);

@@ -32,9 +32,9 @@ export const UserProvider = ({ children }) => {
 
   // Track daily activity when user is authenticated
   useEffect(() => {
-    if (user) {
-      trackActivity();
-    }
+    if (!user) return;
+    const timer = setTimeout(() => trackActivity(), 1000);
+    return () => clearTimeout(timer);
   }, [user]);
 
   return (
