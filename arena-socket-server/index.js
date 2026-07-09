@@ -928,7 +928,7 @@ app.get("/api/verify-match-result/:matchId/:userId", async (req, res) => {
     }
     const match = JSON.parse(matchStr);
 
-    if (match.status === "completed" && match.winnerId) {
+    if (match.status === "completed" && match.winnerId && match.winnerId === userId) {
       return res.json({ verified: true, winnerId: match.winnerId });
     }
 

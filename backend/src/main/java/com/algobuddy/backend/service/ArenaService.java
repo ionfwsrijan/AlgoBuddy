@@ -299,19 +299,7 @@ public class ArenaService {
             throw new IllegalArgumentException("matchId is required");
         }
 
-        boolean isWinner = request.isWinner();
-
-        if (!matchIdStr.startsWith("mock-match-")) {
-            UUID verifiedWinnerId = verifyMatchResult(matchIdStr, requestingUserId);
-            if (!verifiedWinnerId.equals(requestingUserId)) {
-                throw new SecurityException("Match result conflict: verified winner does not match claim");
-            }
-            isWinner = true;
-        }
-        final boolean finalIsWinner = isWinner;
         final int MAX_RETRIES = 3;
-
-        // Execute each retry attempt in an isolated transaction.
         final TransactionTemplate retryTransaction = new TransactionTemplate(transactionManager);
 
         // Ensure every retry starts a new transaction.
@@ -339,8 +327,6 @@ public class ArenaService {
                     }
 
                     if (existingMatch.getWinnerId() != null) {
-                        // Match result has already been recorded. We return silently to prevent
-                        // duplicate submission exceptions from throwing 500 errors on the client.
                         return null;
                     }
 
@@ -349,6 +335,12 @@ public class ArenaService {
                         : existingMatch.getPlayer1Id();
 
                     boolean isOpponentBot = opponentUserId.equals(BOT_USER_ID);
+
+                    boolean verifiedAsWinner = request.isWinner();
+                    if (!matchIdStr.startsWith("mock-match-")) {
+                        UUID verifiedWinnerId = verifyMatchResult(matchIdStr, requestingUserId);
+                        verifiedAsWinner = verifiedWinnerId.equals(requestingUserId);
+                    }
 
                     UserArenaProfile requestingUserProfile = profileRepository.findById(requestingUserId)
                             .orElseGet(() -> createDefaultProfile(requestingUserId));
@@ -359,25 +351,25 @@ public class ArenaService {
                                 .orElseGet(() -> createDefaultProfile(opponentUserId));
                     }
 
-                    int requestingUserRatingChange = finalIsWinner ? 25 : -15;
-                    int opponentRatingChange = finalIsWinner ? -15 : 25;
+                    int requestingUserRatingChange = verifiedAsWinner ? 25 : -15;
+                    int opponentRatingChange = verifiedAsWinner ? -15 : 25;
 
-                    int requestingUserXp = finalIsWinner ? 50 : 10;
-                    int opponentXp = finalIsWinner ? 10 : 50;
+                    int requestingUserXp = verifiedAsWinner ? 50 : 10;
+                    int opponentXp = verifiedAsWinner ? 10 : 50;
 
                     requestingUserProfile.setRating(Math.max(0, requestingUserProfile.getRating() + requestingUserRatingChange));
                     requestingUserProfile.setXp(requestingUserProfile.getXp() + requestingUserXp);
                     requestingUserProfile.setLevel((requestingUserProfile.getXp() / 1000) + 1);
-                    requestingUserProfile.setTotalProblemsSolved(requestingUserProfile.getTotalProblemsSolved() + (finalIsWinner ? 1 : 0));
-                    if (finalIsWinner) requestingUserProfile.setBattlesWon(requestingUserProfile.getBattlesWon() + 1);
+                    requestingUserProfile.setTotalProblemsSolved(requestingUserProfile.getTotalProblemsSolved() + (verifiedAsWinner ? 1 : 0));
+                    if (verifiedAsWinner) requestingUserProfile.setBattlesWon(requestingUserProfile.getBattlesWon() + 1);
                     else requestingUserProfile.setBattlesLost(requestingUserProfile.getBattlesLost() + 1);
 
                     if (!isOpponentBot && opponentProfile != null) {
                         opponentProfile.setRating(Math.max(0, opponentProfile.getRating() + opponentRatingChange));
                         opponentProfile.setXp(opponentProfile.getXp() + opponentXp);
                         opponentProfile.setLevel((opponentProfile.getXp() / 1000) + 1);
-                        opponentProfile.setTotalProblemsSolved(opponentProfile.getTotalProblemsSolved() + (!finalIsWinner ? 1 : 0));
-                        if (!finalIsWinner) opponentProfile.setBattlesWon(opponentProfile.getBattlesWon() + 1);
+                        opponentProfile.setTotalProblemsSolved(opponentProfile.getTotalProblemsSolved() + (!verifiedAsWinner ? 1 : 0));
+                        if (!verifiedAsWinner) opponentProfile.setBattlesWon(opponentProfile.getBattlesWon() + 1);
                         else opponentProfile.setBattlesLost(opponentProfile.getBattlesLost() + 1);
                     }
 
@@ -386,7 +378,7 @@ public class ArenaService {
                         profileRepository.save(opponentProfile);
                     }
 
-                    existingMatch.setWinnerId(finalIsWinner ? requestingUserId : opponentUserId);
+                    existingMatch.setWinnerId(verifiedAsWinner ? requestingUserId : opponentUserId);
                     existingMatch.setEndTime(java.time.LocalDateTime.now());
                     existingMatch.setStatus(ArenaMatch.MatchStatus.COMPLETED);
 
