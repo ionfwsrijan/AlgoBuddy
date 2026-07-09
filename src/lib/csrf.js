@@ -7,16 +7,11 @@ import {
 const CSRF_SECRET =
   process.env.CSRF_SECRET || crypto.randomBytes(32).toString("hex");
 
-export function generateCsrfToken() {
-  const random = crypto.randomBytes(16).toString("hex");
-  const timestamp = Date.now().toString(36);
-
-  const hmac = crypto
-    .createHmac("sha256", CSRF_SECRET)
-    .update(`${random}:${timestamp}`)
-    .digest("hex");
-
-  return `${random}:${timestamp}:${hmac}`;
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
 export function validateCsrf(request) {
@@ -27,38 +22,37 @@ export function validateCsrf(request) {
     return false;
   }
 
-  if (cookieToken !== headerToken) {
+  if (!timingSafeEqual(cookieToken, headerToken)) {
     return false;
+  }
+
+  if (cookieToken.includes(".")) {
+    const parts = cookieToken.split(".");
+    if (parts.length !== 2) return false;
+    const [randomValue, signature] = parts;
+    const expected = crypto
+      .createHmac("sha256", CSRF_SECRET)
+      .update(randomValue)
+      .digest("hex");
+    if (!timingSafeEqual(signature, expected)) return false;
+    return true;
   }
 
   const parts = cookieToken.split(":");
-
-  if (parts.length !== 3) {
-    return false;
-  }
-
+  if (parts.length !== 3) return false;
   const [random, timestamp, hmac] = parts;
-
   const expectedHmac = crypto
     .createHmac("sha256", CSRF_SECRET)
     .update(`${random}:${timestamp}`)
     .digest("hex");
-
-  if (hmac !== expectedHmac) {
-    return false;
-  }
-
+  if (!timingSafeEqual(hmac, expectedHmac)) return false;
   const tokenAge = Date.now() - parseInt(timestamp, 36);
-
-  if (tokenAge > 24 * 60 * 60 * 1000) {
-    return false;
-  }
-
+  if (tokenAge > 24 * 60 * 60 * 1000) return false;
   return true;
 }
 
 export function setCsrfCookie(response) {
-  const token = generateCsrfToken();
+  const token = crypto.randomBytes(32).toString("hex");
 
   response.cookies.set(CSRF_COOKIE_NAME, token, {
     httpOnly: true,

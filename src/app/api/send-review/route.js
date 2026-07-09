@@ -2,7 +2,6 @@ import nodemailer from "nodemailer";
 import { checkRateLimit, checkGlobalSmtpQuota } from "@/lib/rateLimit";
 import { getClientIp } from "@/lib/getClientIp";
 import { verifyTurnstile } from "@/lib/verifyTurnstile";
-import { validateCsrf } from "@/lib/csrf";
 import { jsonResponse, errorResponse, getSupabaseAdmin } from "@/lib/serverApi";
 
 function escapeHtml(value) {
@@ -28,10 +27,6 @@ function clampInt(value, min, max) {
 }
 
 export async function POST(request) {
-  if (!validateCsrf(request)) {
-    return jsonResponse({ error: "Invalid CSRF token" }, 403);
-  }
-
   try {
     const ip = getClientIp(request.headers);
 

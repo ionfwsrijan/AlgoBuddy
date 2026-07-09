@@ -2,7 +2,6 @@ import nodemailer from "nodemailer";
 import { checkRateLimit, checkGlobalSmtpQuota } from "@/lib/rateLimit";
 import { getClientIp } from "@/lib/getClientIp";
 import { verifyTurnstile } from "@/lib/verifyTurnstile";
-import { validateCsrf } from "@/lib/csrf";
 import { jsonResponse, errorResponse, getSupabaseAdmin } from "@/lib/serverApi";
 import { RATE_LIMITS } from "@/config/rateLimits";
 
@@ -21,10 +20,6 @@ function isValidEmail(value) {
 }
 
 export async function POST(req) {
-  if (!validateCsrf(req)) {
-    return Response.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
-
   try {
     const ip = getClientIp(req.headers);
 

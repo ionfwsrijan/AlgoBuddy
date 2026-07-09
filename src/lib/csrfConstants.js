@@ -3,6 +3,7 @@ export const CSRF_HEADER_NAME = "x-csrf-token";
 
 const TRUSTED_ORIGINS = (() => {
   const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+  const vercelUrl = process.env.NEXT_PUBLIC_VERCEL_URL;
 
   const origins = new Set([
     "http://localhost:3000",
@@ -13,9 +14,14 @@ const TRUSTED_ORIGINS = (() => {
   ]);
 
   if (appUrl) origins.add(appUrl.replace(/\/+$/, ""));
+  if (vercelUrl) {
+    origins.add(`https://${vercelUrl.replace(/\/+$/, "")}`);
+  }
 
   return origins;
 })();
+
+const VERCEL_URL = process.env.NEXT_PUBLIC_VERCEL_URL;
 
 export function validateCsrfOrigin(request) {
   const origin = request.headers.get("origin");
@@ -24,7 +30,19 @@ export function validateCsrfOrigin(request) {
   const source = origin || referer || "";
   const normalized = source.replace(/\/+$/, "");
 
-  return TRUSTED_ORIGINS.has(normalized);
+  if (TRUSTED_ORIGINS.has(normalized)) return true;
+
+  if (process.env.NEXT_PUBLIC_VERCEL_ENV === "preview") {
+    try {
+      const url = new URL(normalized);
+      if (url.hostname.endsWith(".vercel.app")) return true;
+      if (VERCEL_URL && url.hostname.endsWith(VERCEL_URL)) return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
 }
 
 const STATE_CHANGING_METHODS = new Set([
