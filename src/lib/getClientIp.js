@@ -1,19 +1,17 @@
 /**
- * Deployment-aware client identity resolution.
+ * Client identity resolution for rate limiting.
  *
- * NEVER falls back to a shared constant: collapsing every anonymous client
- * into one rate-limit bucket would let a single visitor lock out the whole
- * site (see the ip:unknown global-DoS issue).
+ * getClientIp() keeps the original contract: only x-real-ip (set by edge
+ * infrastructure such as Vercel) is trusted unconditionally, and the
+ * fallback is the "unknown" string. x-forwarded-for is client-controlled
+ * and is only parsed when the operator has declared a trusted proxy
+ * (TRUSTED_PROXY_IPS) or the deployment is on Vercel.
  *
- * Resolution order:
- *   1. Vercel edge (VERCEL=1): x-real-ip is set by Vercel and cannot be
- *      spoofed by the client; x-forwarded-for is a fallback.
- *   2. Explicit trusted proxy (TRUSTED_PROXY_IPS): x-forwarded-for is only
- *      parsed when the operator has declared that requests pass through a
- *      trusted proxy which rewrites the header.
- *   3. Local development: trust whatever proxy headers are present.
- *   4. Production with no trustworthy source: return null so callers build a
- *      per-request fingerprint instead of a shared key.
+ * The anti-collapse guarantee lives in resolveClientId(): it never lets an
+ * unidentifiable request share a bucket. When getClientIp() yields
+ * "unknown", it builds a per-request fingerprint instead — so anonymous
+ * traffic never collapses into a single ip:unknown key (the global-DoS
+ * issue this fixes).
  */
 
 const TRUSTED_PROXY_IPS = new Set(
@@ -61,28 +59,33 @@ function realIp(headers) {
 }
 
 /**
- * Returns the client IP when a trustworthy source exists, otherwise null.
- * Callers must NOT substitute a shared constant for null; use
- * resolveClientId() to get a per-request identity instead.
+ * Returns the verified client IP from an incoming request's headers.
+ *
+ * Only x-real-ip is trusted unconditionally — it is set by the edge
+ * infrastructure (e.g. Vercel) and cannot be spoofed by the client.
+ * x-forwarded-for is client-controlled and is only parsed when the
+ * operator has declared a trusted proxy (TRUSTED_PROXY_IPS) or the
+ * deployment is on Vercel.
+ *
+ * This function alone is NOT safe for rate-limit keys: its "unknown"
+ * fallback is a shared constant. Use resolveClientId() for limiting, which
+ * converts "unknown" into a per-request fingerprint instead of collapsing
+ * every anonymous visitor into one bucket.
  *
  * @param {Headers} headers  The request headers object.
- * @returns {string | null}  Verified IP address, or null when undeterminable.
+ * @returns {string}  Verified IP address, or "unknown" if none can be determined.
  */
 export function getClientIp(headers) {
-  if (IS_VERCEL) {
-    return realIp(headers) || leftmostForwardedIp(headers);
-  }
+  const real = realIp(headers);
+  if (real) return real;
 
-  if (TRUSTED_PROXY_IPS.size > 0) {
-    return leftmostForwardedIp(headers) || realIp(headers);
-  }
-
-  if (process.env.NODE_ENV !== "production") {
-    return realIp(headers) || leftmostForwardedIp(headers);
+  if (IS_VERCEL || TRUSTED_PROXY_IPS.size > 0) {
+    const forwarded = leftmostForwardedIp(headers);
+    if (forwarded) return forwarded;
   }
 
   warnIfNoTrustedIpSource();
-  return null;
+  return "unknown";
 }
 
 // FNV-1a 32-bit — synchronous and environment-agnostic (works in Node and
@@ -100,15 +103,15 @@ function fnv1a(str) {
  * Returns a stable per-client identifier for rate limiting: the trusted
  * client IP when one can be determined, otherwise a fingerprint of the
  * request headers (x-forwarded-for, user-agent, accept-language,
- * cf-connecting-ip). The result is never a shared constant, so anonymous
- * traffic never collapses into a single bucket.
+ * cf-connecting-ip). The result is never the shared "unknown" constant,
+ * so anonymous traffic never collapses into a single bucket.
  *
  * @param {Headers} headers  The request headers object.
  * @returns {string}  "1.2.3.4" or "fp:<8-hex-char-fingerprint>".
  */
 export function resolveClientId(headers) {
   const ip = getClientIp(headers);
-  if (ip) return ip;
+  if (ip && ip !== "unknown") return ip;
 
   const parts = [
     headers.get("x-forwarded-for") || "",
